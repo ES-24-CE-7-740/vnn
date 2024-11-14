@@ -1,3 +1,8 @@
+# Custom
+**/*.err
+**/*.out
+**/slurm*
+
 # Data and outputs
 data/
 log/
