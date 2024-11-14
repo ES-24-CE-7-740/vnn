@@ -362,7 +362,7 @@ def main(args):
         log_string('Best inctance avg mIOU is: %.5f'%best_inctance_avg_iou)
         global_epoch+=1
         
-        if (epoch % 5) == 0:
+        if (epoch % 2) == 0:
             log_string('Saving checkpoint model...')
             savepath = str(checkpoints_dir) + '/newest_model.pth'
             
