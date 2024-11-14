@@ -58,6 +58,38 @@ def parse_args():
     parser.add_argument('--n_knn', default=40, type=int, help='Number of nearest neighbors to use, not applicable to PointNet [default: 20]')
     return parser.parse_args()
 
+import signal
+# import gc
+class GracefulKillerBasic:
+  def __init__(self, log_string, checkpoints_dir):
+    signal.signal(signal.SIGINT, self.exit_gracefully)
+    signal.signal(signal.SIGTERM, self.exit_gracefully)
+    signal.signal(signal.SIGUSR1, self.exit_gracefully)
+    self.log_string = log_string
+    self.checkpoints_dir = checkpoints_dir
+    self.kill_now = False
+    self.exit_attempted = False
+
+  def exit_gracefully(self, signum, frame):
+    
+    # # Wait for all GPU operations to finish
+    # torch.cuda.synchronize()
+    # gc.collect()
+    
+    # Prevent multiple exit attempts
+    if self.exit_attempted:
+        return
+    self.exit_attempted = True
+    
+    self.log_string('Received kill signal...')
+    
+    savepath = str(self.checkpoints_dir) + '/newest_model.pth'
+    self.log_string(f'Note: newest model is saved at: {savepath}')
+    
+    self.log_string('Gracefully exiting...')
+    self.kill_now = True
+    exit(0)
+
 def main(args):
     def log_string(str):
         logger.info(str)
@@ -105,6 +137,7 @@ def main(args):
     num_classes = 16
     num_part = 50
     '''MODEL LOADING'''
+    log_string(f'CUDA_VISIBLE_DEVICES={os.environ["CUDA_VISIBLE_DEVICES"]}')
     MODEL = importlib.import_module(args.model)
 
     classifier = MODEL.get_model(args, num_part, normal_channel=args.normal).cuda()
@@ -121,7 +154,8 @@ def main(args):
             torch.nn.init.constant_(m.bias.data, 0.0)
 
     try:
-        checkpoint = torch.load(str(experiment_dir) + '/checkpoints/best_model.pth')
+        checkpoint = torch.load(str(experiment_dir) + '/checkpoints/newest_model.pth')
+        #checkpoint = torch.load(str(experiment_dir) + '/checkpoints/best_model.pth')
         start_epoch = checkpoint['epoch']
         classifier.load_state_dict(checkpoint['model_state_dict'])
         log_string('Use pretrain model')
@@ -160,6 +194,10 @@ def main(args):
     best_class_avg_iou = 0
     best_inctance_avg_iou = 0
 
+    '''SIGTERM HANDLER'''
+    #killer = GracefulKiller(log_string=log_string, checkpoints_dir=checkpoints_dir)
+    killer = GracefulKillerBasic(log_string=log_string, checkpoints_dir=checkpoints_dir)
+    
     for epoch in range(start_epoch,args.epoch):
         log_string('Epoch %d (%d/%s):' % (global_epoch + 1, epoch + 1, args.epoch))
         '''Adjust learning rate and BN momentum'''
@@ -176,6 +214,12 @@ def main(args):
 
         '''learning one epoch'''
         for i, data in tqdm(enumerate(trainDataLoader), total=len(trainDataLoader), smoothing=0.9):
+            
+            # # Check for kill signal
+            # if killer.kill_now:
+            #     torch.cuda.empty_cache()
+            #     exit(0)
+            
             points, label, target = data
             
             trot = None
@@ -219,6 +263,12 @@ def main(args):
                     seg_label_to_cat[label] = cat
 
             for batch_id, (points, label, target) in tqdm(enumerate(testDataLoader), total=len(testDataLoader), smoothing=0.9):
+                
+                # # Check for kill signal
+                # if killer.kill_now:
+                #     torch.cuda.empty_cache()
+                #     exit(0)
+
                 cur_batch_size, NUM_POINT, _ = points.size()
                 
                 trot = None
@@ -271,7 +321,7 @@ def main(args):
             mean_shape_ious = np.mean(list(shape_ious.values()))
             test_metrics['accuracy'] = total_correct / float(total_seen)
             test_metrics['class_avg_accuracy'] = np.mean(
-                np.array(total_correct_class) / np.array(total_seen_class, dtype=np.float))
+                np.array(total_correct_class) / np.array(total_seen_class, dtype=np.float64))
             for cat in sorted(shape_ious.keys()):
                 log_string('eval mIoU of %s %f' % (cat + ' ' * (14 - len(cat)), shape_ious[cat]))
             test_metrics['class_avg_iou'] = mean_shape_ious
@@ -281,8 +331,13 @@ def main(args):
         log_string('Epoch %d test Accuracy: %f  Class avg mIOU: %f   Inctance avg mIOU: %f' % (
                  epoch+1, test_metrics['accuracy'],test_metrics['class_avg_iou'],test_metrics['inctance_avg_iou']))
         if (test_metrics['inctance_avg_iou'] >= best_inctance_avg_iou):
-            logger.info('Save model...')
-            savepath = str(checkpoints_dir) + '/best_model.pth'
+            log_string('New best inctance avg mIOU: %.5f!'%test_metrics['inctance_avg_iou'])
+            #log_string('Saving model...')
+            
+            snapshot_time = datetime.datetime.now().strftime("%d-%m-%Y_%H-%M-%S")
+            savepath = str(checkpoints_dir) + f'/best_model_{snapshot_time}.pth'
+            
+            #savepath = str(checkpoints_dir) + '/best_model.pth'
             log_string('Saving at %s'% savepath)
             state = {
                 'epoch': epoch,
@@ -306,6 +361,24 @@ def main(args):
         log_string('Best class avg mIOU is: %.5f'%best_class_avg_iou)
         log_string('Best inctance avg mIOU is: %.5f'%best_inctance_avg_iou)
         global_epoch+=1
+        
+        if (epoch % 5) == 0:
+            log_string('Saving checkpoint model...')
+            savepath = str(checkpoints_dir) + '/newest_model.pth'
+            
+            state = {
+                'epoch': epoch,
+                'train_acc': train_instance_acc,
+                'test_acc': test_metrics['accuracy'],
+                'class_avg_iou': test_metrics['class_avg_iou'],
+                'inctance_avg_iou': test_metrics['inctance_avg_iou'],
+                'model_state_dict': classifier.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+            }
+            torch.save(state, savepath)
+            
+            log_string('Checkpoint model saved at %s!'% savepath)
+        log_string('\n---------------------------------------\n')
 
 if __name__ == '__main__':
     args = parse_args()
